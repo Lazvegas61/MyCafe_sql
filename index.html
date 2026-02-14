@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="tr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MyCafe Admin Panel</title>
+
+    <!-- GLOBAL DEBUG FLAGS (ZARARSIZ) -->
+    <script>
+      window.syncServiceDebug = true;
+    </script>
+
+    <!-- SyncService EVENT DEBUG (SADECE DİNLEYİCİ) -->
+    <script>
+      document.addEventListener('DOMContentLoaded', function () {
+        const syncEvents = [
+          'masa_guncellendi',
+          'adisyon_guncellendi',
+          'urun_guncellendi',
+          'musteri_guncellendi',
+          'borc_guncellendi',
+          'senkronize_et',
+          'fiyat_guncellendi',
+          'kalem_eklendi',
+          'kalem_silindi',
+          'toplam_guncellendi'
+        ];
+
+        syncEvents.forEach(eventName => {
+          window.addEventListener(eventName, function (event) {
+            if (window.syncServiceDebug) {
+              console.log(`📢 SyncService Event: ${eventName}`, event.detail);
+            }
+          });
+        });
+
+        window.addEventListener('storage', function (event) {
+          if (window.syncServiceDebug && event.key && event.key.startsWith('mc_')) {
+            console.log('💾 Storage değişti:', event.key);
+          }
+        });
+      });
+    </script>
+
+    <!-- DEBUG PANEL (MANUEL, PASİF) -->
+    <script>
+      document.addEventListener('keydown', function (e) {
+        if (e.ctrlKey && e.shiftKey && e.key === 'D') {
+          e.preventDefault();
+          const panel = document.getElementById('sync-debug-panel');
+          if (panel) {
+            panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+          } else {
+            createDebugPanel();
+          }
+        }
+      });
+
+      function createDebugPanel() {
+        const panel = document.createElement('div');
+        panel.id = 'sync-debug-panel';
+        panel.style.cssText = `
+          position: fixed;
+          bottom: 10px;
+          right: 10px;
+          background: rgba(0,0,0,0.9);
+          color: white;
+          padding: 15px;
+          border-radius: 8px;
+          font-family: monospace;
+          font-size: 12px;
+          z-index: 9999;
+          max-width: 320px;
+          max-height: 400px;
+          overflow-y: auto;
+        `;
+
+        panel.innerHTML = `
+          <div style="display:flex;justify-content:space-between;margin-bottom:8px;">
+            <strong>SyncService Debug</strong>
+            <button onclick="this.parentElement.parentElement.style.display='none'"
+              style="background:#f44336;color:white;border:none;padding:2px 6px;border-radius:3px;">X</button>
+          </div>
+          <div id="sync-debug-content">
+            <div>SyncService: <span id="sync-status">Kontrol ediliyor…</span></div>
+            <hr>
+            <div id="storage-keys"></div>
+          </div>
+        `;
+
+        document.body.appendChild(panel);
+        updateDebugPanel();
+        setInterval(updateDebugPanel, 5000);
+      }
+
+      function updateDebugPanel() {
+        const status = document.getElementById('sync-status');
+        if (!status) return;
+
+        status.textContent = window.syncService ? '✅ HAZIR' : '⏳ Yükleniyor';
+
+        const keysDiv = document.getElementById('storage-keys');
+        if (!keysDiv) return;
+
+        let html = '';
+        for (let i = 0; i < localStorage.length; i++) {
+          const key = localStorage.key(i);
+          if (key.startsWith('mc_')) {
+            html += `<div style="font-size:10px;margin-top:3px;">${key}</div>`;
+          }
+        }
+        keysDiv.innerHTML = html || '<div style="font-size:10px;">mc_ kaydı yok</div>';
+      }
+    </script>
+
+    <style>
+      body {
+        margin: 0;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>

@@ -1,0 +1,964 @@
+import React, { useEffect, useState, useCallback, useMemo } from "react";
+import { useParams, useNavigate } from "react-router-dom";
+import { useAuth } from "../../hooks/useAuth";
+import api from "../../api/axiosConfig";
+
+// MyCafe Premium Tema Renkleri
+const RENK = {
+  arka: "#e5cfa5",
+  kart: "#4a3722",
+  kartYazi: "#ffffff",
+  altin: "#f5d085",
+  yesil: "#2ecc71",
+  kirmizi: "#c0392b",
+  turuncu: "#e67e22",
+};
+
+// ------------------------------
+// UTILITY FONKSİYONLAR - SADECE FORMATLAMA
+// ------------------------------
+const formatSaat = (dateString) => {
+  if (!dateString) return "--:--";
+  try {
+    const d = new Date(dateString);
+    if (isNaN(d.getTime())) return "--:--";
+    return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  } catch {
+    return "--:--";
+  }
+};
+
+const formatSure = (dakika) => {
+  if (!dakika || dakika <= 0) return "0 dk";
+  const h = Math.floor(dakika / 60);
+  const m = dakika % 60;
+  if (h > 0) return `${h} sa ${m} dk`;
+  return `${m} dk`;
+};
+
+const formatPara = (value) => {
+  const num = parseFloat(value || 0);
+  if (isNaN(num)) return "0,00";
+  return num.toLocaleString('tr-TR', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  });
+};
+
+const gecenDakika = (acilis) => {
+  if (!acilis) return 0;
+  try {
+    const bas = new Date(acilis);
+    const simdi = new Date();
+    return Math.floor((simdi - bas) / 60000);
+  } catch {
+    return 0;
+  }
+};
+
+// ------------------------------
+// ANA BİLEŞEN - MYCAFE ANAYASASI UYUMLU
+// ------------------------------
+export default function MasaDetay() {
+  const { masaId } = useParams(); // ✅ Artık masaId kullanıyoruz (table_id)
+  const navigate = useNavigate();
+  const { user, hasPermission } = useAuth();
+  
+  // STATE - SADECE GÖSTERİM İÇİN
+  const [masa, setMasa] = useState(null);
+  const [adisyon, setAdisyon] = useState(null);
+  const [simdi, setSimdi] = useState(Date.now());
+  const [kapanisMesaji, setKapanisMesaji] = useState("");
+  const [isLoading, setIsLoading] = useState(true);
+  const [loadingAction, setLoadingAction] = useState(false);
+
+  // ------------------------------
+  // API ENTEGRASYONU - MYCAFE KURALLARI
+  // ------------------------------
+  const loadMasaBilgisi = useCallback(async () => {
+    if (!masaId || !hasPermission("tables_view")) return;
+    
+    try {
+      setIsLoading(true);
+      const response = await api.get(`/tables/${masaId}`);
+      setMasa(response.data);
+    } catch (error) {
+      console.error("[MyCafe] Masa bilgisi yüklenemedi:", error);
+      setMasa(null);
+    }
+  }, [masaId, hasPermission]);
+
+  const loadAdisyonBilgisi = useCallback(async () => {
+    if (!masaId || !hasPermission("invoices_view")) return;
+    
+    try {
+      // Masa için açık adisyon var mı kontrol et
+      const response = await api.get(`/invoices/table/${masaId}/open`);
+      
+      if (response.data.invoice) {
+        setAdisyon(response.data.invoice);
+      } else {
+        setAdisyon(null);
+      }
+    } catch (error) {
+      console.error("[MyCafe] Adisyon bilgisi yüklenemedi:", error);
+      setAdisyon(null);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [masaId, hasPermission]);
+
+  const loadAllData = useCallback(async () => {
+    await Promise.all([
+      loadMasaBilgisi(),
+      loadAdisyonBilgisi()
+    ]);
+  }, [loadMasaBilgisi, loadAdisyonBilgisi]);
+
+  const handleMasaKapat = useCallback(async () => {
+    if (!adisyon || !hasPermission("invoices_close")) {
+      alert("❌ Yetkiniz yok!");
+      return;
+    }
+    
+    const onayMesaji = `Masa ${masa?.table_number} kapatılsın mı?\n\nToplam: ${formatPara(adisyon.total_amount)} TL\nKalem sayısı: ${(adisyon.line_items || []).length}`;
+    
+    if (!window.confirm(onayMesaji)) {
+      return;
+    }
+    
+    try {
+      setLoadingAction(true);
+      console.log('[MyCafe] Masa kapatma başlıyor:', adisyon.invoice_id);
+      
+      // ✅ API üzerinden adisyon kapatma (Atomik işlem)
+      const response = await api.post(`/invoices/${adisyon.invoice_id}/close`);
+      
+      if (response.data.success) {
+        setKapanisMesaji(`✅ Masa ${masa?.table_number} başarıyla kapatıldı! Toplam: ${formatPara(adisyon.total_amount)} TL`);
+        
+        // Başarılı kapanış sonrası verileri yenile
+        setTimeout(() => {
+          loadAllData();
+          // Masalara yönlendir
+          setTimeout(() => {
+            navigate("/masalar");
+          }, 1000);
+        }, 500);
+      } else {
+        alert("❌ Masa kapatılamadı!");
+      }
+    } catch (error) {
+      console.error("[MyCafe] Masa kapatma hatası:", error);
+      alert(`❌ Masa kapatılamadı: ${error.response?.data?.detail || error.message}`);
+    } finally {
+      setLoadingAction(false);
+    }
+  }, [adisyon, masa, hasPermission, loadAllData, navigate]);
+
+  const handleKalemSil = useCallback(async (lineItemId) => {
+    if (!hasPermission("invoices_manage")) {
+      alert("❌ Yetkiniz yok!");
+      return;
+    }
+    
+    try {
+      const response = await api.delete(`/invoices/items/${lineItemId}`);
+      
+      if (response.data.success) {
+        // Adisyon bilgisini yenile
+        loadAdisyonBilgisi();
+        alert("✅ Kalem başarıyla silindi.");
+      }
+    } catch (error) {
+      console.error("[MyCafe] Kalem silme hatası:", error);
+      alert(`❌ Kalem silinemedi: ${error.response?.data?.detail || error.message}`);
+    }
+  }, [hasPermission, loadAdisyonBilgisi]);
+
+  const handleAdetDegistir = useCallback(async (lineItemId, yeniAdet) => {
+    if (!hasPermission("invoices_manage")) {
+      alert("❌ Yetkiniz yok!");
+      return;
+    }
+    
+    if (yeniAdet < 1) {
+      // Adet 0 veya altına düşerse kalemi sil
+      if (window.confirm("Adet 0 olursa kalem silinecek. Devam edilsin mi?")) {
+        await handleKalemSil(lineItemId);
+      }
+      return;
+    }
+    
+    try {
+      const response = await api.put(`/invoices/items/${lineItemId}`, {
+        quantity: yeniAdet
+      });
+      
+      if (response.data.success) {
+        loadAdisyonBilgisi();
+      }
+    } catch (error) {
+      console.error("[MyCafe] Adet değiştirme hatası:", error);
+      alert(`❌ Adet değiştirilemedi: ${error.response?.data?.detail || error.message}`);
+    }
+  }, [hasPermission, handleKalemSil, loadAdisyonBilgisi]);
+
+  // ------------------------------
+  // DATA LOADING - MYCAFE KURALLARI
+  // ------------------------------
+  useEffect(() => {
+    if (!user) return;
+    
+    loadAllData();
+    
+    // Real-time updates için polling
+    const interval = setInterval(() => {
+      if (document.visibilityState === 'visible' && adisyon) {
+        setSimdi(Date.now());
+        loadAdisyonBilgisi();
+      }
+    }, 30000); // 30 saniyede bir güncelle
+    
+    return () => clearInterval(interval);
+  }, [user, loadAllData, loadAdisyonBilgisi, adisyon]);
+
+  // ------------------------------
+  // HESAPLAMALAR - SADECE FORMATLAMA
+  // ------------------------------
+  const masaNo = useMemo(() => masa?.table_number || masaId, [masa, masaId]);
+  const gecenSüre = useMemo(() => gecenDakika(adisyon?.created_at), [adisyon]);
+  const acilisSaati = useMemo(() => formatSaat(adisyon?.created_at), [adisyon]);
+
+  // ------------------------------
+  // RENDER - YÜKLENİYOR DURUMU
+  // ------------------------------
+  if (!hasPermission("tables_view") || !hasPermission("invoices_view")) {
+    return (
+      <div style={{
+        background: RENK.arka,
+        minHeight: "100vh",
+        padding: "26px",
+        boxSizing: "border-box",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center"
+      }}>
+        <div style={{
+          fontSize: "24px",
+          fontWeight: "bold",
+          color: "#e74c3c",
+          marginBottom: "20px"
+        }}>
+          ❌ Yetkiniz Yok
+        </div>
+        <div style={{
+          fontSize: "16px",
+          color: "#7f8c8d",
+          textAlign: "center",
+          maxWidth: "400px"
+        }}>
+          Masa detaylarını görüntüleme yetkiniz bulunmamaktadır.
+        </div>
+        <button
+          onClick={() => navigate("/masalar")}
+          style={{
+            marginTop: "30px",
+            padding: "12px 24px",
+            borderRadius: "999px",
+            border: "none",
+            cursor: "pointer",
+            background: "linear-gradient(135deg, rgba(245,208,133,0.95), rgba(228,184,110,0.9))",
+            color: "#3a260f",
+            fontWeight: 800,
+            fontSize: "14px",
+            boxShadow: "0 4px 10px rgba(0,0,0,0.35)",
+            minWidth: "140px",
+          }}
+        >
+          ← Masalara Dön
+        </button>
+      </div>
+    );
+  }
+
+  if (isLoading) {
+    return (
+      <div style={{
+        background: RENK.arka,
+        minHeight: "100vh",
+        display: "flex",
+        justifyContent: "center",
+        alignItems: "center",
+        flexDirection: "column",
+        gap: "20px"
+      }}>
+        <div style={{
+          fontSize: "24px",
+          fontWeight: "bold",
+          color: "#4a3722"
+        }}>
+          Yükleniyor...
+        </div>
+        <div style={{
+          width: "50px",
+          height: "50px",
+          border: `4px solid ${RENK.altin}`,
+          borderTopColor: "transparent",
+          borderRadius: "50%",
+          animation: "spin 1s linear infinite"
+        }}></div>
+        <style>{`
+          @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+          }
+        `}</style>
+      </div>
+    );
+  }
+
+  // ------------------------------
+  // RENDER - MASA BOŞSA
+  // ------------------------------
+  const isMasaBos = !adisyon;
+  
+  if (isMasaBos) {
+    return (
+      <div style={{
+        background: RENK.arka,
+        minHeight: "100vh",
+        padding: "26px",
+        boxSizing: "border-box",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center"
+      }}>
+        {/* HEADER */}
+        <div style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          marginBottom: "30px",
+          width: "100%",
+          maxWidth: "800px"
+        }}>
+          <h1 style={{
+            fontSize: "40px",
+            fontWeight: 900,
+            color: "#3a2a14",
+            margin: 0,
+          }}>
+            Masa {masaNo}
+          </h1>
+          
+          <button
+            onClick={() => navigate("/masalar")}
+            style={{
+              padding: "12px 24px",
+              borderRadius: "999px",
+              border: "none",
+              cursor: "pointer",
+              background: "linear-gradient(135deg, rgba(245,208,133,0.95), rgba(228,184,110,0.9))",
+              color: "#3a260f",
+              fontWeight: 800,
+              fontSize: "14px",
+              boxShadow: "0 4px 10px rgba(0,0,0,0.35)",
+              minWidth: "140px",
+              transition: "all 0.2s",
+            }}
+          >
+            ← Masalara Dön
+          </button>
+        </div>
+
+        {/* BOŞ MASA KARTI */}
+        <div style={{
+          background: RENK.kart,
+          color: RENK.kartYazi,
+          borderRadius: "26px",
+          width: "100%",
+          maxWidth: "400px",
+          height: "300px",
+          padding: "30px",
+          textAlign: "center",
+          boxShadow: "0 10px 18px rgba(0,0,0,0.45)",
+          display: "flex",
+          flexDirection: "column",
+          justifyContent: "center",
+          alignItems: "center",
+          gap: "20px"
+        }}>
+          {/* MASA NUMARASI */}
+          <div style={{
+            fontSize: "36px",
+            fontWeight: 900,
+            color: RENK.altin,
+          }}>
+            Masa {masaNo}
+          </div>
+
+          {/* İKON */}
+          <div style={{
+            fontSize: "90px",
+            color: RENK.altin,
+            textShadow: "0 5px 8px rgba(0,0,0,0.4)",
+          }}>
+            🪑
+          </div>
+
+          {/* DURUM */}
+          <div style={{
+            fontSize: "28px",
+            opacity: 0.85,
+            fontWeight: 700,
+            color: "#b8b8b8",
+          }}>
+            BOŞ
+          </div>
+          
+          {/* AÇIKLAMA */}
+          <div style={{
+            fontSize: "16px",
+            color: "#a0a0a0",
+            marginTop: "10px",
+            textAlign: "center",
+            lineHeight: "1.4"
+          }}>
+            Bu masa şu anda boş.<br />
+            Yeni adisyon açmak için Masalar sayfasından<br />
+            bu masaya çift tıklayın.
+          </div>
+        </div>
+        
+        {/* FOOTER */}
+        <div style={{
+          marginTop: "30px",
+          fontSize: "13px",
+          color: "#7f8c8d",
+          textAlign: "center",
+          padding: "10px",
+        }}>
+          <div style={{ fontSize: "11px", marginTop: "4px", opacity: 0.7 }}>
+            Adisyon eklemek için Masalar sayfasına dönün
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ------------------------------
+  // RENDER - MASA DOLUYSA
+  // ------------------------------
+  return (
+    <div style={{
+      background: RENK.arka,
+      minHeight: "100vh",
+      padding: "26px",
+      boxSizing: "border-box",
+    }}>
+      {/* HEADER */}
+      <div style={{
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+        marginBottom: "30px",
+        flexWrap: "wrap",
+        gap: "20px",
+      }}>
+        <h1 style={{
+          fontSize: "40px",
+          fontWeight: 900,
+          color: "#3a2a14",
+          margin: 0,
+        }}>
+          Masa {masaNo} Detay
+        </h1>
+
+        <div style={{
+          display: "flex",
+          alignItems: "center",
+          gap: "12px",
+          flexWrap: "wrap",
+        }}>
+          {/* MASAYI KAPAT BUTONU */}
+          {hasPermission("invoices_close") && (
+            <button
+              onClick={handleMasaKapat}
+              disabled={loadingAction}
+              style={{
+                padding: "12px 24px",
+                borderRadius: "999px",
+                border: "none",
+                cursor: loadingAction ? "not-allowed" : "pointer",
+                background: loadingAction 
+                  ? "#95a5a6" 
+                  : "linear-gradient(135deg, #27ae60, #229954)",
+                color: "#ffffff",
+                fontWeight: 800,
+                fontSize: "14px",
+                boxShadow: "0 4px 10px rgba(0,0,0,0.35)",
+                minWidth: "160px",
+                transition: "all 0.2s",
+                opacity: loadingAction ? 0.7 : 1
+              }}
+            >
+              {loadingAction ? "⏳ İşleniyor..." : "✕ MASAYI KAPAT"}
+            </button>
+          )}
+
+          {/* MASALARA DÖN */}
+          <button
+            onClick={() => navigate("/masalar")}
+            style={{
+              padding: "12px 24px",
+              borderRadius: "999px",
+              border: "none",
+              cursor: "pointer",
+              background: "linear-gradient(135deg, rgba(245,208,133,0.95), rgba(228,184,110,0.9))",
+              color: "#3a260f",
+              fontWeight: 800,
+              fontSize: "14px",
+              boxShadow: "0 4px 10px rgba(0,0,0,0.35)",
+              minWidth: "140px",
+              transition: "all 0.2s",
+            }}
+          >
+            ← Masalara Dön
+          </button>
+        </div>
+      </div>
+
+      {/* KAPANIŞ MESAJI */}
+      {kapanisMesaji && (
+        <div style={{
+          marginBottom: "20px",
+          padding: "15px",
+          borderRadius: "10px",
+          background: "#d4edda",
+          color: "#155724",
+          border: "1px solid #c3e6cb",
+          textAlign: "center",
+          fontSize: "16px",
+          fontWeight: "bold",
+          animation: "fadeIn 0.5s"
+        }}>
+          {kapanisMesaji}
+        </div>
+      )}
+
+      {/* ANA İÇERİK - 2 KOLONLU */}
+      <div style={{
+        display: "grid",
+        gridTemplateColumns: "1fr 1fr",
+        gap: "24px",
+        maxWidth: "1200px",
+        margin: "0 auto",
+        '@media (max-width: 900px)': {
+          gridTemplateColumns: "1fr"
+        }
+      }}>
+        {/* SOL KOLON: MASA BİLGİLERİ */}
+        <div>
+          {/* MASA KARTI */}
+          <div style={{
+            background: RENK.kart,
+            color: RENK.kartYazi,
+            borderRadius: "26px",
+            height: "280px",
+            padding: "18px 16px",
+            textAlign: "center",
+            boxShadow: "0 10px 18px rgba(0,0,0,0.45)",
+            position: "relative",
+            overflow: "hidden",
+            marginBottom: "24px"
+          }}>
+            {/* MASA NUMARASI */}
+            <div style={{
+              fontSize: "26px",
+              fontWeight: 900,
+              marginBottom: "10px",
+              color: RENK.altin,
+            }}>
+              Masa {masaNo}
+            </div>
+
+            {/* İKON */}
+            <div style={{
+              fontSize: "74px",
+              marginBottom: "10px",
+              color: RENK.yesil,
+              textShadow: "0 5px 8px rgba(0,0,0,0.4)",
+            }}>
+              🔔
+            </div>
+
+            {/* ZAMAN BİLGİLERİ */}
+            <div style={{
+              fontSize: "14px",
+              marginBottom: "8px",
+              opacity: 0.9,
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              padding: "0 5px",
+            }}>
+              <div style={{ fontWeight: 600, display: "flex", alignItems: "center", gap: "4px" }}>
+                <span>⏰</span>
+                <span>Açılış: {acilisSaati}</span>
+              </div>
+              <div style={{ fontWeight: 600, display: "flex", alignItems: "center", gap: "4px" }}>
+                <span>⏱️</span>
+                <span>{formatSure(gecenSüre)}</span>
+              </div>
+            </div>
+
+            {/* TOPLAM TUTAR */}
+            <div style={{
+              fontSize: "28px",
+              fontWeight: 800,
+              color: RENK.altin,
+              marginTop: "15px",
+            }}>
+              ₺ {formatPara(adisyon.total_amount)}
+            </div>
+            
+            {/* KALEM SAYISI */}
+            <div style={{
+              fontSize: "14px",
+              opacity: 0.7,
+              marginTop: "8px",
+            }}>
+              {(adisyon.line_items || []).length} adet ürün
+            </div>
+          </div>
+
+          {/* MÜŞTERİ BİLGİLERİ */}
+          <div style={{
+            background: "#fff7e6",
+            borderRadius: "16px",
+            padding: "20px",
+            boxShadow: "0 4px 12px rgba(0,0,0,0.1)"
+          }}>
+            <h3 style={{
+              color: "#4a3722",
+              marginTop: 0,
+              marginBottom: "15px",
+              borderBottom: "2px solid #f5d085",
+              paddingBottom: "8px"
+            }}>
+              Müşteri Bilgileri
+            </h3>
+            
+            <div style={{
+              display: "grid",
+              gap: "10px"
+            }}>
+              <div style={{
+                display: "flex",
+                justifyContent: "space-between"
+              }}>
+                <span style={{ fontWeight: "600" }}>Müşteri Adı:</span>
+                <span>{adisyon.customer_name || "Kayıtlı Değil"}</span>
+              </div>
+              
+              <div style={{
+                display: "flex",
+                justifyContent: "space-between"
+              }}>
+                <span style={{ fontWeight: "600" }}>Adisyon ID:</span>
+                <span style={{
+                  fontSize: "12px",
+                  fontFamily: "monospace",
+                  background: "#f0f0f0",
+                  padding: "2px 6px",
+                  borderRadius: "4px"
+                }}>
+                  {adisyon.invoice_id?.substring(0, 12) || 'N/A'}
+                </span>
+              </div>
+              
+              <div style={{
+                display: "flex",
+                justifyContent: "space-between"
+              }}>
+                <span style={{ fontWeight: "600" }}>Durum:</span>
+                <span style={{
+                  color: RENK.yesil,
+                  fontWeight: "bold",
+                  background: "rgba(46, 204, 113, 0.1)",
+                  padding: "4px 8px",
+                  borderRadius: "4px"
+                }}>
+                  AÇIK
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* SAĞ KOLON: ADISYON DETAY */}
+        <div>
+          <div style={{
+            background: "#fff7e6",
+            borderRadius: "16px",
+            padding: "20px",
+            boxShadow: "0 4px 12px rgba(0,0,0,0.1)",
+            height: "100%"
+          }}>
+            <div style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+              marginBottom: "20px"
+            }}>
+              <h3 style={{
+                color: "#4a3722",
+                margin: 0
+              }}>
+                Adisyon Kalemleri
+              </h3>
+              
+              <div style={{
+                fontSize: "18px",
+                fontWeight: "bold",
+                color: "#4a3722",
+                background: "#f5d085",
+                padding: "8px 16px",
+                borderRadius: "20px",
+                boxShadow: "0 2px 6px rgba(0,0,0,0.1)"
+              }}>
+                ₺ {formatPara(adisyon.total_amount)}
+              </div>
+            </div>
+            
+            {/* KALEM LİSTESİ */}
+            <div style={{
+              maxHeight: "400px",
+              overflowY: "auto",
+              borderRadius: "8px",
+              border: "1px solid #e5cfa5"
+            }}>
+              {(adisyon.line_items || []).length === 0 ? (
+                <div style={{
+                  textAlign: "center",
+                  padding: "40px 20px",
+                  color: "#a0a0a0",
+                  fontSize: "16px"
+                }}>
+                  🛒 Adisyonda henüz ürün yok
+                  <div style={{ fontSize: "14px", marginTop: "10px" }}>
+                    Ürün eklemek için Adisyon sayfasına gidin
+                  </div>
+                </div>
+              ) : (
+                <table style={{
+                  width: "100%",
+                  borderCollapse: "collapse"
+                }}>
+                  <thead>
+                    <tr style={{
+                      background: "#4a3722",
+                      color: "#ffffff",
+                      position: "sticky",
+                      top: 0
+                    }}>
+                      <th style={{ padding: "12px", textAlign: "left", width: "40%" }}>Ürün</th>
+                      <th style={{ padding: "12px", textAlign: "center", width: "20%" }}>Adet</th>
+                      <th style={{ padding: "12px", textAlign: "right", width: "20%" }}>Birim</th>
+                      <th style={{ padding: "12px", textAlign: "right", width: "20%" }}>Toplam</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(adisyon.line_items || []).map((kalem, index) => (
+                      <tr 
+                        key={kalem.line_item_id || index}
+                        style={{
+                          borderBottom: "1px solid #e5cfa5",
+                          background: index % 2 === 0 ? "#fffdf7" : "#fff7e6",
+                        }}
+                      >
+                        <td style={{ padding: "12px" }}>
+                          <div style={{ fontWeight: "600" }}>
+                            {kalem.product_name_snapshot || kalem.product_name || "Ürün"}
+                          </div>
+                          {kalem.notes && (
+                            <div style={{
+                              fontSize: "12px",
+                              color: "#7f8c8d",
+                              fontStyle: "italic",
+                              marginTop: "4px"
+                            }}>
+                              📝 {kalem.notes}
+                            </div>
+                          )}
+                        </td>
+                        
+                        <td style={{ padding: "12px", textAlign: "center" }}>
+                          {hasPermission("invoices_manage") ? (
+                            <div style={{
+                              display: "flex",
+                              alignItems: "center",
+                              justifyContent: "center",
+                              gap: "8px"
+                            }}>
+                              <button
+                                onClick={() => handleAdetDegistir(kalem.line_item_id, (kalem.quantity || 1) - 1)}
+                                style={{
+                                  width: "28px",
+                                  height: "28px",
+                                  borderRadius: "50%",
+                                  border: "1px solid #d0b48c",
+                                  background: "#fbe9e7",
+                                  cursor: "pointer",
+                                  fontSize: "16px",
+                                  lineHeight: "1",
+                                  display: "flex",
+                                  alignItems: "center",
+                                  justifyContent: "center",
+                                }}
+                              >
+                                -
+                              </button>
+                              
+                              <span style={{
+                                fontWeight: "bold",
+                                minWidth: "30px",
+                                textAlign: "center",
+                                fontSize: "16px"
+                              }}>
+                                {kalem.quantity || 1}
+                              </span>
+                              
+                              <button
+                                onClick={() => handleAdetDegistir(kalem.line_item_id, (kalem.quantity || 1) + 1)}
+                                style={{
+                                  width: "28px",
+                                  height: "28px",
+                                  borderRadius: "50%",
+                                  border: "1px solid #d0b48c",
+                                  background: "#e8f5e9",
+                                  cursor: "pointer",
+                                  fontSize: "16px",
+                                  lineHeight: "1",
+                                  display: "flex",
+                                  alignItems: "center",
+                                  justifyContent: "center",
+                                }}
+                              >
+                                +
+                              </button>
+                            </div>
+                          ) : (
+                            <span style={{ fontWeight: "bold", fontSize: "16px" }}>
+                              {kalem.quantity || 1}
+                            </span>
+                          )}
+                        </td>
+                        
+                        <td style={{ padding: "12px", textAlign: "right" }}>
+                          ₺ {formatPara(kalem.unit_price_snap || kalem.unit_price || 0)}
+                        </td>
+                        
+                        <td style={{ padding: "12px", textAlign: "right" }}>
+                          <div style={{
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "flex-end",
+                            gap: "8px"
+                          }}>
+                            <span style={{ fontWeight: "bold", fontSize: "15px" }}>
+                              ₺ {formatPara(kalem.line_total || 0)}
+                            </span>
+                            
+                            {hasPermission("invoices_manage") && (
+                              <button
+                                onClick={() => handleKalemSil(kalem.line_item_id)}
+                                style={{
+                                  padding: "6px 10px",
+                                  borderRadius: "6px",
+                                  border: "none",
+                                  background: RENK.kirmizi,
+                                  color: "#ffffff",
+                                  cursor: "pointer",
+                                  fontSize: "12px",
+                                  fontWeight: "bold",
+                                }}
+                                title="Sil"
+                              >
+                                ✕
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+            </div>
+            
+            {/* TOPLAM ÖZET */}
+            <div style={{
+              marginTop: "20px",
+              padding: "15px",
+              background: "#4a3722",
+              color: "#ffffff",
+              borderRadius: "10px",
+              display: "grid",
+              gap: "8px"
+            }}>
+              <div style={{
+                display: "flex",
+                justifyContent: "space-between",
+                fontSize: "14px"
+              }}>
+                <span>Toplam Kalem:</span>
+                <span>{(adisyon.line_items || []).length} adet</span>
+              </div>
+              
+              <div style={{
+                display: "flex",
+                justifyContent: "space-between",
+                fontSize: "16px",
+                fontWeight: "bold",
+                borderTop: "1px solid rgba(255,255,255,0.2)",
+                paddingTop: "8px",
+                marginTop: "8px"
+              }}>
+                <span>GENEL TOPLAM:</span>
+                <span style={{ color: RENK.altin, fontSize: "18px" }}>
+                  ₺ {formatPara(adisyon.total_amount)}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* FOOTER BİLGİ */}
+      <div style={{
+        marginTop: "30px",
+        fontSize: "13px",
+        color: "#7f8c8d",
+        textAlign: "center",
+        padding: "10px",
+        borderTop: "1px solid rgba(0,0,0,0.1)",
+      }}>
+        Masa {masaNo} • Açılış: {acilisSaati} • Geçen Süre: {formatSure(gecenSüre)}
+        <div style={{ fontSize: "11px", marginTop: "4px", opacity: 0.7 }}>
+          Adisyon ID: {adisyon.invoice_id?.substring(0, 16) || 'N/A'} • Son güncelleme: {formatSaat(adisyon.updated_at)}
+        </div>
+      </div>
+
+      <style>{`
+        @keyframes fadeIn {
+          from { opacity: 0; transform: translateY(-10px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+      `}</style>
+    </div>
+  );
+}
